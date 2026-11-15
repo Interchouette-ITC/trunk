@@ -1119,6 +1119,10 @@ impl RustApp {
     #[tracing::instrument(level = "trace", skip(self, output))]
     async fn final_digest(&self, output: &mut RustAppOutput) -> Result<()> {
         let final_wasm = self.cfg.staging_dist.join(&output.wasm_output);
+        output.wasm_size = fs::metadata(&final_wasm)
+            .await
+            .with_context(|| format!("reading final wasm size of '{}'", final_wasm.display()))?
+            .len();
         output
             .integrities
             .record_file(
