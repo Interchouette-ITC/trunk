@@ -209,3 +209,149 @@ const wasm = await __trunkInitializer(init, '{base}{wasm}', {size}, initializer(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        pipelines::{
+            TrunkAssetPipelineOutput,
+            manifest::AssetManifest,
+            rust::sri::{SriOptions, SriType},
+        },
+        processing::integrity::IntegrityType,
+    };
+
+    #[rstest::rstest]
+    #[case::explicit(Some(0), true)]
+    #[case::implicit(None, true)]
+    #[case::missing_head(None, false)]
+    #[tokio::test]
+    async fn manifest_records_generated_wasm_bootstrap_and_preloads(
+        #[case] id: Option<usize>,
+        #[case] has_head: bool,
+    ) {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = RtcBuild::new_test(temp.path()).await.expect("test config");
+        cfg.public_url = "/app/".parse().expect("public URL");
+        cfg.create_nonce = Some("test-nonce".to_owned());
+        let js = "app-123.js";
+        let wasm = "app-123_bg.wasm";
+        let wasm_bytes = b"\0asm\x01\0\0\0";
+        std::fs::write(
+            cfg.staging_dist.join(js),
+            "export default async function init() { return {}; }",
+        )
+        .expect("write JavaScript output");
+        std::fs::write(cfg.staging_dist.join(wasm), wasm_bytes).expect("write WASM output");
+
+        let mut integrities = SriBuilder::new(IntegrityType::Sha384);
+        for (rel, name, options) in [
+            (SriType::ModulePreload, js, SriOptions::default()),
+            (
+                SriType::Preload,
+                wasm,
+                SriOptions::default()
+                    .r#as("fetch")
+                    .r#type("application/wasm"),
+            ),
+        ] {
+            integrities
+                .record_file(rel, name, options, cfg.staging_dist.join(name))
+                .await
+                .expect("record preload integrity");
+        }
+
+        let output = RustAppOutput {
+            cfg: Arc::new(cfg),
+            id,
+            js_output: js.to_owned(),
+            wasm_output: wasm.to_owned(),
+            wasm_size: wasm_bytes.len() as u64,
+            r#type: RustAppType::Main,
+            cross_origin: CrossOrigin::Anonymous,
+            integrities,
+            import_bindings: true,
+            import_bindings_name: Some("testBindings".to_owned()),
+            compression_algorithm: None,
+            initializer: None,
+            wasm_bindgen_features: WasmBindgenFeatures {
+                init_with_object: true,
+            },
+        };
+        let head = if has_head {
+            if id.is_some() {
+                r#"<head><link data-trunk-id="0" rel="rust"></head>"#
+            } else {
+                "<head></head>"
+            }
+        } else {
+            ""
+        };
+        let mut document = Document::new(
+            format!("<html>{head}<body></body></html>"),
+            Default::default(),
+        )
+        .expect("source document");
+        let locations = [(trunk_id_selector(0), (0, "head".to_owned()))].into();
+        let mut manifest = AssetManifest::new("/app/", "index.html");
+
+        TrunkAssetPipelineOutput::RustApp(output)
+            .finalize_with_manifest(&mut document, &mut manifest, &locations)
+            .await
+            .expect("finalize Rust pipeline and manifest");
+
+        let html = String::from_utf8(document.into_inner()).expect("generated HTML");
+        assert_eq!(manifest.wasm.len(), 1);
+        assert_eq!(manifest.wasm[0].js_url, "/app/app-123.js");
+        assert_eq!(manifest.wasm[0].wasm_url, "/app/app-123_bg.wasm");
+        assert_eq!(manifest.document_assets.len(), if has_head { 3 } else { 1 });
+        for asset in &manifest.document_assets {
+            assert!(html.contains(&asset.html), "phantom asset: {}", asset.html);
+            assert_eq!(asset.order, id);
+            assert!(asset.html.contains(r#"nonce="test-nonce""#));
+        }
+        let bootstrap = manifest.document_assets.last().expect("bootstrap fragment");
+        assert_eq!(
+            bootstrap.location,
+            if id.is_some() { "head" } else { "body" }
+        );
+        assert!(bootstrap.html.contains(r#"<script type="module""#));
+        assert!(
+            bootstrap
+                .html
+                .contains("import init, * as bindings from '/app/app-123.js'")
+        );
+        assert!(
+            bootstrap
+                .html
+                .contains("module_or_path: '/app/app-123_bg.wasm'")
+        );
+        assert!(bootstrap.html.contains("window.testBindings = bindings"));
+        assert!(bootstrap.html.contains("TrunkApplicationStarted"));
+        assert_eq!(html.matches("<script").count(), 1);
+
+        if has_head {
+            for preload in &manifest.document_assets[..2] {
+                assert_eq!(preload.location, "head");
+                assert!(preload.html.contains("integrity=\"sha384-"));
+                assert!(preload.html.contains("crossorigin=\"anonymous\""));
+            }
+            assert!(
+                manifest.document_assets[0]
+                    .html
+                    .contains("rel=\"modulepreload\"")
+            );
+            assert!(
+                manifest.document_assets[1]
+                    .html
+                    .contains("type=\"application/wasm\"")
+            );
+        }
+        let serialized = serde_json::to_value(&manifest).expect("serialize manifest");
+        assert_eq!(
+            serialized["document_assets"].as_array().unwrap().len(),
+            manifest.document_assets.len()
+        );
+    }
+}

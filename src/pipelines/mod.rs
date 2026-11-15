@@ -18,7 +18,7 @@ mod tailwind_css_extra;
 
 pub use html::HtmlPipeline;
 pub use manifest::ASSET_MANIFEST_FILE;
-use manifest::{AssetManifest, AssetMetadata};
+use manifest::{AssetManifest, AssetMetadata, DocumentAsset};
 
 use crate::{
     common::{dist_relative, html_rewrite::Document, path_exists},
@@ -206,6 +206,71 @@ pub enum TrunkAssetPipelineOutput {
 }
 
 impl TrunkAssetPipelineOutput {
+    async fn finalize_with_manifest(
+        self,
+        target_html: &mut Document,
+        manifest: &mut AssetManifest,
+        locations: &HashMap<String, (usize, String)>,
+    ) -> Result<()> {
+        self.record_assets(manifest).await?;
+        let capture = self.emits_document_asset();
+        let asset_order = self.document_order();
+        if capture {
+            target_html.start_asset_capture();
+        }
+        let result = self
+            .finalize(target_html)
+            .await
+            .context("failed to finalize asset pipeline");
+        if capture {
+            for fragment in target_html.finish_asset_capture() {
+                let (order, location) = match fragment.selector.as_str() {
+                    "html head" => (asset_order, "head".to_owned()),
+                    "html body" => (asset_order, "body".to_owned()),
+                    selector => locations
+                        .get(selector)
+                        .map(|(order, location)| (Some(*order), location.clone()))
+                        .unwrap_or_else(|| (None, "unknown".to_owned())),
+                };
+                manifest.document_assets.push(DocumentAsset {
+                    order,
+                    location,
+                    html: fragment.html,
+                });
+            }
+        }
+        result
+    }
+
+    fn document_order(&self) -> Option<usize> {
+        match self {
+            Self::Css(out) => Some(out.id),
+            Self::Sass(out) => Some(out.id),
+            Self::TailwindCss(out) => Some(out.id),
+            Self::TailwindCssExtra(out) => Some(out.id),
+            Self::Js(out) => Some(out.id),
+            Self::Icon(out) => Some(out.id),
+            Self::RustApp(out) => out.id,
+            Self::Inline(out) => Some(out.id),
+            Self::CopyFile(_) | Self::CopyDir(_) => None,
+            Self::None => None,
+        }
+    }
+
+    fn emits_document_asset(&self) -> bool {
+        match self {
+            Self::Css(_)
+            | Self::Sass(_)
+            | Self::TailwindCss(_)
+            | Self::TailwindCssExtra(_)
+            | Self::Js(_)
+            | Self::Icon(_)
+            | Self::RustApp(_) => true,
+            Self::Inline(_) => true,
+            Self::CopyFile(_) | Self::CopyDir(_) | Self::None => false,
+        }
+    }
+
     async fn record_assets(&self, manifest: &mut AssetManifest) -> Result<()> {
         match self {
             TrunkAssetPipelineOutput::Css(out) => {
