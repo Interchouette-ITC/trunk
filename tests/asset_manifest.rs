@@ -2,18 +2,22 @@
 
 use std::{fs, process::Command};
 
-#[test]
-fn records_generated_inline_assets_and_exact_markup() {
+#[rstest::rstest]
+#[case::unminified("never")]
+#[case::minified("always")]
+fn records_generated_inline_assets_and_exact_markup(#[case] minify: &str) {
     let temp = tempfile::tempdir().expect("temporary directory");
     fs::write(
         temp.path().join("Trunk.toml"),
-        r#"[build]
+        format!(
+            r#"[build]
 target = "index.html"
 dist = "dist"
 public_url = "/app/"
 create_nonce = true
-minify = "always"
-"#,
+minify = "{minify}"
+"#
+        ),
     )
     .expect("write Trunk config");
     fs::write(
@@ -26,6 +30,7 @@ minify = "always"
 <script data-trunk src="app.js" type="module" defer></script>
 <link data-trunk rel="inline" href="inline.js" type="module" />
 <link data-trunk rel="inline" href="inline.html" type="html" />
+<link data-trunk rel="inline" href="inline.svg" type="svg" />
 </body></html>"#,
     )
     .expect("write Trunk source HTML");
@@ -40,6 +45,11 @@ minify = "always"
     .expect("write inline module");
     fs::write(temp.path().join("inline.html"), "<span>inline HTML</span>")
         .expect("write inline HTML");
+    fs::write(
+        temp.path().join("inline.svg"),
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3"/></svg>"#,
+    )
+    .expect("write inline SVG");
 
     let output = Command::new(env!("CARGO_BIN_EXE_trunk"))
         .arg("build")
@@ -71,13 +81,13 @@ minify = "always"
     let document_assets = manifest["document_assets"]
         .as_array()
         .expect("generated document assets");
-    assert_eq!(document_assets.len(), 5);
+    assert_eq!(document_assets.len(), 6);
     assert_eq!(
         document_assets
             .iter()
             .map(|asset| asset["order"].as_u64().expect("asset order"))
             .collect::<Vec<_>>(),
-        [0, 1, 2, 3, 4]
+        [0, 1, 2, 3, 4, 5]
     );
 
     for asset in document_assets {
@@ -104,4 +114,10 @@ minify = "always"
     assert_eq!(document_assets[3]["location"], "body");
     assert_eq!(document_assets[4]["html"], "<span>inline HTML</span>");
     assert_eq!(document_assets[4]["location"], "body");
+    let inline_svg = document_assets[5]["html"]
+        .as_str()
+        .expect("inline SVG markup");
+    assert!(inline_svg.starts_with("<svg"));
+    assert!(inline_svg.contains("<circle"));
+    assert_eq!(document_assets[5]["location"], "body");
 }

@@ -22,7 +22,8 @@ The manifest contains:
   includes inline CSS, scripts, HTML and SVG, generated WASM bootstrap markup,
   Trunk's loading attributes, and configured CSP nonce attributes. Consumers
   can use these fragments directly without parsing Trunk's generated HTML or
-  recreating its asset tags.
+  recreating its asset tags. Unmatched replacements and no-op appends to void
+  elements do not produce document asset entries.
 - An empty `wasm` array for HTML-only builds.
 
 Example:

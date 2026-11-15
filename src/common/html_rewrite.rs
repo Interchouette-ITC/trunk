@@ -134,21 +134,32 @@ In case this is a false positive, the "--allow-self-closing-script" flag can be 
     }
 
     /// Will silently fail when attempting to append to [Void Element](https://developer.mozilla.org/en-US/docs/Glossary/Void_element).
+    /// Such no-op insertions are not captured as document assets.
     pub fn append_html(&mut self, selector: &str, html: &str) -> Result<()> {
+        let mut inserted = 0;
         self.select_mut(selector, |el| {
-            el.append(html, lol_html::html_content::ContentType::Html);
+            if el.can_have_content() {
+                el.append(html, lol_html::html_content::ContentType::Html);
+                inserted += 1;
+            }
             Ok(())
         })?;
-        self.capture_asset_fragment(selector, html);
+        for _ in 0..inserted {
+            self.capture_asset_fragment(selector, html);
+        }
         Ok(())
     }
 
     pub fn replace_with_html(&mut self, selector: &str, html: &str) -> Result<()> {
+        let mut replaced = 0;
         self.select_mut(selector, |el| {
             el.replace(html, lol_html::html_content::ContentType::Html);
+            replaced += 1;
             Ok(())
         })?;
-        self.capture_asset_fragment(selector, html);
+        for _ in 0..replaced {
+            self.capture_asset_fragment(selector, html);
+        }
         Ok(())
     }
 
@@ -206,6 +217,63 @@ mod test {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn append_capture_tracks_only_elements_that_accept_content() {
+        let source =
+            "<html><head><link><meta></head><body><img><input><div></div><div></div></body></html>";
+        let markup = "<span>inserted</span>";
+        for (selector, expected_count) in [
+            ("link, meta, img, input", 0),
+            ("#missing", 0),
+            ("div", 2),
+            ("img, div", 2),
+        ] {
+            let mut doc = Document::new(source, Default::default()).expect("valid HTML");
+            doc.start_asset_capture();
+            doc.append_html(selector, markup).expect("append markup");
+            let fragments = doc.finish_asset_capture();
+
+            assert_eq!(fragments.len(), expected_count, "{selector}");
+            assert_eq!(
+                String::from_utf8_lossy(doc.as_ref())
+                    .matches(markup)
+                    .count(),
+                expected_count,
+                "{selector}"
+            );
+            assert!(
+                fragments
+                    .iter()
+                    .all(|fragment| { fragment.selector == selector && fragment.html == markup })
+            );
+        }
+    }
+
+    #[test]
+    fn replacement_capture_tracks_only_matched_elements() {
+        let source = "<html><head><link><link></head><body></body></html>";
+        let markup = "<script>init()</script>";
+        for (selector, expected_count) in [("#missing", 0), ("link", 2)] {
+            let mut doc = Document::new(source, Default::default()).expect("valid HTML");
+            doc.start_asset_capture();
+            doc.replace_with_html(selector, markup)
+                .expect("replace markup");
+
+            assert_eq!(
+                doc.finish_asset_capture().len(),
+                expected_count,
+                "{selector}"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(doc.as_ref())
+                    .matches(markup)
+                    .count(),
+                expected_count,
+                "{selector}"
+            );
+        }
     }
 
     /// Run some basic tests with a spec-compliant HTML file.

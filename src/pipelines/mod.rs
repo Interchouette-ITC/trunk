@@ -18,7 +18,7 @@ mod tailwind_css_extra;
 
 pub use html::HtmlPipeline;
 pub use manifest::ASSET_MANIFEST_FILE;
-use manifest::{AssetManifest, AssetMetadata};
+use manifest::{AssetManifest, AssetMetadata, DocumentAsset};
 
 use crate::{
     common::{dist_relative, html_rewrite::Document, path_exists},
@@ -206,6 +206,42 @@ pub enum TrunkAssetPipelineOutput {
 }
 
 impl TrunkAssetPipelineOutput {
+    async fn finalize_with_manifest(
+        self,
+        target_html: &mut Document,
+        manifest: &mut AssetManifest,
+        locations: &HashMap<String, (usize, String)>,
+    ) -> Result<()> {
+        self.record_assets(manifest).await?;
+        let capture = self.emits_document_asset();
+        let asset_order = self.document_order();
+        if capture {
+            target_html.start_asset_capture();
+        }
+        let result = self
+            .finalize(target_html)
+            .await
+            .context("failed to finalize asset pipeline");
+        if capture {
+            for fragment in target_html.finish_asset_capture() {
+                let (order, location) = match fragment.selector.as_str() {
+                    "html head" => (asset_order, "head".to_owned()),
+                    "html body" => (asset_order, "body".to_owned()),
+                    selector => locations
+                        .get(selector)
+                        .map(|(order, location)| (Some(*order), location.clone()))
+                        .unwrap_or_else(|| (None, "unknown".to_owned())),
+                };
+                manifest.document_assets.push(DocumentAsset {
+                    order,
+                    location,
+                    html: fragment.html,
+                });
+            }
+        }
+        result
+    }
+
     fn document_order(&self) -> Option<usize> {
         match self {
             Self::Css(out) => Some(out.id),

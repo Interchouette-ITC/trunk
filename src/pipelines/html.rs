@@ -10,8 +10,8 @@ use crate::{
     hooks::{spawn_hooks, wait_hooks},
     pipelines::{
         ASSET_MANIFEST_FILE, AssetManifest, Attrs, PipelineStage, TRUNK_ID, TrunkAsset,
-        TrunkAssetPipelineOutput, TrunkAssetReference, manifest::DocumentAsset, rust::RustApp,
-        trunk_id_selector, trunk_script_id_selector,
+        TrunkAssetPipelineOutput, TrunkAssetReference, rust::RustApp, trunk_id_selector,
+        trunk_script_id_selector,
     },
     processing::minify::minify_html,
 };
@@ -277,36 +277,9 @@ impl HtmlPipeline {
                 .context("failed to await asset pipeline")?
                 .context("error from asset pipeline")?;
 
-            asset.record_assets(manifest).await?;
-            let capture = asset.emits_document_asset();
-            let asset_order = asset.document_order();
-            if capture {
-                target_html.start_asset_capture();
-            }
-            let result = asset
-                .finalize(target_html)
+            asset
+                .finalize_with_manifest(target_html, manifest, locations)
                 .await
-                .context("failed to finalize asset pipeline");
-            if capture {
-                for fragment in target_html.finish_asset_capture() {
-                    let (order, location) = match fragment.selector.as_str() {
-                        "html head" => (asset_order, "head".to_owned()),
-                        "html body" => (asset_order, "body".to_owned()),
-                        selector => locations
-                            .get(selector)
-                            .map(|(order, location)| (Some(*order), location.clone()))
-                            .unwrap_or_else(|| (None, "unknown".to_owned())),
-                    };
-                    manifest.document_assets.push(DocumentAsset {
-                        order,
-                        location,
-                        html: fragment.html,
-                    });
-                }
-            }
-            result?;
-
-            Ok(())
         }
 
         // pull all results and store their errors
