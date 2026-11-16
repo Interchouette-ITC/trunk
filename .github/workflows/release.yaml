@@ -50,9 +50,11 @@ jobs:
             install: sudo apt-get update && sudo apt-get install -y musl-tools
           - target: x86_64-apple-darwin
             os: macos-26-intel
-          # macos-26 (arm64) sat queued without a runner; macos-15 is the GA arm64 image.
+          # Cross-compiled on the Intel runner: hosted arm64 macOS runners are often
+          # unavailable. The arm64 binary cannot run there, so it is checked statically.
           - target: aarch64-apple-darwin
-            os: macos-15
+            os: macos-26-intel
+            cross: true
           - target: x86_64-pc-windows-msvc
             os: windows-2025
             ext: .exe
@@ -101,9 +103,16 @@ jobs:
           if [[ "${{ matrix.ext }}" != ".exe" ]]; then
             strip "upload/${BIN}"
           fi
-          VERSION="$("upload/${BIN}" --version)"
-          echo "$VERSION"
-          case "$VERSION" in "trunk "*"+itc.${GITHUB_SHA::12}") ;; *) echo "missing build revision"; exit 1 ;; esac
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            ARCHS="$(lipo -archs "upload/${BIN}")"
+            echo "architectures: $ARCHS"
+            [[ "$ARCHS" == "arm64" ]] || { echo "expected an arm64 binary"; exit 1; }
+            grep -aq "+itc.${GITHUB_SHA::12}" "upload/${BIN}" || { echo "missing build revision"; exit 1; }
+          else
+            VERSION="$("upload/${BIN}" --version)"
+            echo "$VERSION"
+            case "$VERSION" in "trunk "*"+itc.${GITHUB_SHA::12}") ;; *) echo "missing build revision"; exit 1 ;; esac
+          fi
           # Windows ships as .zip, other targets as .tar.gz (Serenade picks the same format).
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
             (cd upload && 7z a -tzip "../trunk-${{ matrix.target }}.zip" "${BIN}")
