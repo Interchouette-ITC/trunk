@@ -1,5 +1,6 @@
 # Rolling pre-release `trunk-itc-dev` of the Interchouette Trunk fork.
-# Each push to main (or a manual run after an upstream sync) runs CI, builds the
+# Manual only (Actions > Release trunk-itc-dev > Run workflow on main), e.g. after an
+# upstream sync: runs CI, builds the
 # fork for the platforms Serenade supports, moves tag `trunk-itc-dev` to the commit
 # and replaces the release assets, then verifies the published tag and assets.
 # Serenade downloads these binaries; asset names are stable: trunk-<target>.tar.gz
@@ -8,9 +9,6 @@
 # on main; Serenade refuses archives whose attestation does not verify.
 name: Release trunk-itc-dev
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -27,7 +25,18 @@ env:
   FEATURES: --no-default-features --features rustls
 
 jobs:
+  # Serenade only accepts attestations signed by this workflow on refs/heads/main.
+  require-main:
+    runs-on: ubuntu-slim
+    steps:
+      - name: Require main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "Release trunk-itc-dev only runs on main (got ${{ github.ref }})"
+          exit 1
+
   ci:
+    needs: require-main
     uses: ./.github/workflows/ci.yaml
 
   build:
@@ -41,8 +50,9 @@ jobs:
             install: sudo apt-get update && sudo apt-get install -y musl-tools
           - target: x86_64-apple-darwin
             os: macos-26-intel
+          # macos-26 (arm64) sat queued without a runner; macos-15 is the GA arm64 image.
           - target: aarch64-apple-darwin
-            os: macos-26
+            os: macos-15
           - target: x86_64-pc-windows-msvc
             os: windows-2025
             ext: .exe
@@ -153,7 +163,7 @@ jobs:
           VERSION="$(tar -xzOf dist/trunk-x86_64-unknown-linux-musl.tar.gz trunk > "$RUNNER_TEMP/trunk" && chmod +x "$RUNNER_TEMP/trunk" && "$RUNNER_TEMP/trunk" --version)"
           NOTES="Interchouette fork of [Trunk](https://github.com/trunk-rs/trunk) (MIT/Apache-2.0), built from \`main\` @ \`${SHA}\` (\`${VERSION}\`).
 
-          Rolling pre-release, moved on each push to \`main\`. Consumed by Serenade, which downloads \`trunk-<target>.tar.gz\` (\`trunk-<target>.zip\` on Windows) and verifies it against the matching \`.sha256\` file and its build provenance attestation (\`gh attestation verify <archive> --repo ${GH_REPO} --signer-workflow ${GH_REPO}/.github/workflows/release.yaml\`).
+          Rolling pre-release, moved on each manual run of the release workflow on \`main\`. Consumed by Serenade, which downloads \`trunk-<target>.tar.gz\` (\`trunk-<target>.zip\` on Windows) and verifies it against the matching \`.sha256\` file and its build provenance attestation (\`gh attestation verify <archive> --repo ${GH_REPO} --signer-workflow ${GH_REPO}/.github/workflows/release.yaml\`).
 
           Targets: \`x86_64-unknown-linux-musl\`, \`x86_64-apple-darwin\`, \`aarch64-apple-darwin\`, \`x86_64-pc-windows-msvc\`."
 
