@@ -1,92 +1,50 @@
-name: Release
+# Rolling pre-release `trunk-itc-dev` of the Interchouette Trunk fork.
+# Each push to main (or a manual run after an upstream sync) runs CI, builds the
+# fork for the platforms Serenade supports, moves tag `trunk-itc-dev` to the commit
+# and replaces the release assets, then verifies the published tag and assets.
+# Serenade downloads these binaries; asset names are stable: trunk-<target>.tar.gz
+# (trunk-<target>.zip on Windows), each with a matching .sha256 file.
+name: Release trunk-itc-dev
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-trunk-itc-dev
+  # Never cancel a release mid-way: that could leave the tag and assets out of sync.
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: trunk-itc-dev
+  # rustls (ring): pure Rust TLS for static musl builds; no update check against upstream Trunk.
+  FEATURES: --no-default-features --features rustls
 
 jobs:
-  init:
-    runs-on: ubuntu-24.04
-    outputs:
-      version: ${{steps.version.outputs.version}}
-      prerelease: ${{steps.state.outputs.prerelease}}
-    steps:
-      - name: Evaluate state
-        id: state
-        env:
-          HEAD_REF: ${{github.head_ref}}
-        run: |
-          test -z "${HEAD_REF}" && (echo 'do-publish=true' >> $GITHUB_OUTPUT)
-          if [[ "${{ github.event.ref }}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo release=true >> $GITHUB_OUTPUT
-          elif [[ "${{ github.event.ref }}" =~ ^refs/tags/v.*$ ]]; then
-              echo prerelease=true >> $GITHUB_OUTPUT
-          fi
-      - name: Set version
-        id: version
-        run: |
-          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
-          [ "$VERSION" == "main" ] && VERSION=latest
-          echo "Version: $VERSION"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+  ci:
+    uses: ./.github/workflows/ci.yaml
 
   build:
+    needs: ci
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
-        rust:
-          - stable
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-          - x86_64-pc-windows-msvc
-          - aarch64-pc-windows-msvc
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-24.04
-            name: trunk-x86_64-unknown-linux-gnu.tar.gz
-            install: |
-              sudo apt install -y libssl-dev
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-            name: trunk-aarch64-unknown-linux-gnu.tar.gz
-            install: |
-              sudo apt install -y libssl-dev
-
           - target: x86_64-unknown-linux-musl
             os: ubuntu-24.04
-            name: trunk-x86_64-unknown-linux-musl.tar.gz
-            install: |
-              sudo apt install -y musl-tools
-            args: --features vendored
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04-arm
-            name: trunk-aarch64-unknown-linux-musl.tar.gz
-            install: |
-              sudo apt install -y musl-tools
-            args: --features vendored
-
+            install: sudo apt-get update && sudo apt-get install -y musl-tools
           - target: x86_64-apple-darwin
             os: macos-26-intel
-            name: trunk-x86_64-apple-darwin.tar.gz
           - target: aarch64-apple-darwin
             os: macos-26
-            name: trunk-aarch64-apple-darwin.tar.gz
-
           - target: x86_64-pc-windows-msvc
             os: windows-2025
-            name: trunk-x86_64-pc-windows-msvc.zip
-            ext: ".exe"
-          - target: aarch64-pc-windows-msvc
-            os: windows-11-arm
-            name: trunk-aarch64-pc-windows-msvc.zip
-            ext: ".exe"
-            strip: llvm-strip
+            ext: .exe
+            archive: zip
 
     runs-on: ${{ matrix.os }}
 
@@ -102,142 +60,147 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Setup | Install dependencies
         if: matrix.install != ''
         run: ${{ matrix.install }}
 
-      - name: Setup | Disable rustup self-update
-        # workaround for: https://github.com/rust-lang/rustup/issues/3709
-        run: |
-          rustup set auto-self-update disable
-
       - name: Setup | Rust
         run: |
-          rustup toolchain install ${{ matrix.rust }} --target ${{ matrix.target }} --profile minimal
-          rustup default ${{ matrix.rust }}
+          rustup set auto-self-update disable
+          rustup toolchain install stable --target ${{ matrix.target }} --profile minimal
+          rustup default stable
 
+      # Embedded by build.rs: `trunk --version` prints `trunk <version>+itc.<sha12>`.
       - name: Build | Build
         shell: bash
         run: |
-          if [[ "${{ matrix.xcode }}" == "true" ]]; then
-            export SDKROOT=$(xcrun -sdk macosx --show-sdk-path)
-            export MACOSX_DEPLOYMENT_TARGET=$(xcrun -sdk macosx --show-sdk-platform-version)
-          fi
-          
-          OPTS="--release --no-default-features --features update_check,native-tls"
-          OPTS="$OPTS ${{ matrix.args }}"
-          
-          if [[ -n "${{ matrix.target }}" ]]; then
-            OPTS="$OPTS --target=${{ matrix.target }}"
-          fi
+          export TRUNK_BUILD_REVISION="${GITHUB_SHA::12}"
+          cargo build --release --locked $FEATURES --target ${{ matrix.target }}
 
-          cargo build ${OPTS}
-
-      - name: Post Build | List output
+      - name: Post Build | Package
         shell: bash
         run: |
-          ls -l target/
-
-      - name: Post Build | Move binary
-        shell: bash
-        run: |
+          set -euo pipefail
+          BIN="trunk${{ matrix.ext }}"
           mkdir -p upload
-          
-          # if we have an alternate target, there is a sub-directory
-          if [[ -f "target/release/trunk${{ matrix.ext }}" ]]; then
-            SRC="target/release/trunk${{ matrix.ext }}"
-          elif [[ -f "target/${{ matrix.target }}/release/trunk${{ matrix.ext }}" ]]; then
-            SRC="target/${{ matrix.target }}/release/trunk${{ matrix.ext }}"
-          else
-            echo "Unable to find output"
-            find target
-            false # stop build
+          cp -pv "target/${{ matrix.target }}/release/${BIN}" "upload/${BIN}"
+          if [[ "${{ matrix.ext }}" != ".exe" ]]; then
+            strip "upload/${BIN}"
           fi
-          
-          # for upload
-          cp -pv "${SRC}" upload/trunk${{ matrix.ext }}
-
-      - name: Post Build | Strip binary
-        working-directory: upload
-        run: |
-          ls -l trunk${{matrix.ext}}
-          ${{ matrix.strip || 'strip' }} trunk${{matrix.ext}}
-          ls -l trunk${{matrix.ext}}
-
-      - name: Post Build | Prepare artifacts [zip]
-        if: endsWith(matrix.name, '.zip')
-        working-directory: upload
-        run: |
-          7z a ${{ matrix.name }} trunk${{matrix.ext}}
-
-      - name: Post Build | Prepare artifacts [tar.gz]
-        if: endsWith(matrix.name, '.tar.gz')
-        working-directory: upload
-        run: |
-          tar czvf ${{ matrix.name }} trunk${{matrix.ext}}
+          VERSION="$("upload/${BIN}" --version)"
+          echo "$VERSION"
+          case "$VERSION" in "trunk "*"+itc.${GITHUB_SHA::12}") ;; *) echo "missing build revision"; exit 1 ;; esac
+          # Windows ships as .zip, other targets as .tar.gz (Serenade picks the same format).
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            (cd upload && 7z a -tzip "../trunk-${{ matrix.target }}.zip" "${BIN}")
+          else
+            tar -czvf "trunk-${{ matrix.target }}.tar.gz" -C upload "${BIN}"
+          fi
 
       - name: Post Build | Upload artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.name }}
-          path: upload/${{ matrix.name }}
+          name: trunk-${{ matrix.target }}
+          path: trunk-${{ matrix.target }}.${{ matrix.archive || 'tar.gz' }}
           if-no-files-found: error
 
   release:
-    needs:
-      - init
-      - build
+    needs: build
     runs-on: ubuntu-24.04
     steps:
       - name: Setup | Checkout
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
 
       - name: Setup | Artifacts
         uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Setup | Checksums
-        run: for file in trunk-*/trunk-*; do openssl dgst -sha256 -r "$file" | awk '{print $1}' > "${file}.sha256"; done
-
-      - name: Setup | Install convco
+        working-directory: dist
         run: |
-          curl -sLO https://github.com/convco/convco/releases/download/v0.4.2/convco-ubuntu.zip
-          unzip convco-ubuntu.zip
-          chmod a+x convco
-          sudo mv convco /usr/local/bin
+          set -euo pipefail
+          shopt -s nullglob
+          for file in trunk-*.tar.gz trunk-*.zip; do
+            sha256sum "$file" | awk '{print $1}' > "${file}.sha256"
+          done
+          ls -la
 
-      - name: Setup | Generate changelog
-        run: |
-          convco changelog -s --max-majors=1 --max-minors=1 --max-patches=1 > RELEASE_LOG.md
-
-      - name: Build | Publish
+      - name: Publish | Move trunk-itc-dev to this commit
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: v${{ needs.init.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
         run: |
-          OPTS=""
-          if [[ "${{ needs.init.outputs.prerelease }}" == "true" ]]; then
-            OPTS="${OPTS} -p"
+          set -euo pipefail
+          VERSION="$(tar -xzOf dist/trunk-x86_64-unknown-linux-musl.tar.gz trunk > "$RUNNER_TEMP/trunk" && chmod +x "$RUNNER_TEMP/trunk" && "$RUNNER_TEMP/trunk" --version)"
+          NOTES="Interchouette fork of [Trunk](https://github.com/trunk-rs/trunk) (MIT/Apache-2.0), built from \`main\` @ \`${SHA}\` (\`${VERSION}\`).
+
+          Rolling pre-release, moved on each push to \`main\`. Consumed by Serenade, which downloads \`trunk-<target>.tar.gz\` (\`trunk-<target>.zip\` on Windows) and verifies it against the matching \`.sha256\` file.
+
+          Targets: \`x86_64-unknown-linux-musl\`, \`x86_64-apple-darwin\`, \`aarch64-apple-darwin\`, \`x86_64-pc-windows-msvc\`."
+
+          git tag -f "$RELEASE_TAG" "$SHA"
+          git push -f origin "refs/tags/${RELEASE_TAG}"
+
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --prerelease --title "Trunk ITC dev" --notes "$NOTES"
+          else
+            gh release create "$RELEASE_TAG" --prerelease --title "Trunk ITC dev" --notes "$NOTES" --verify-tag
           fi
-          gh release create ${OPTS} --title "${{ needs.init.outputs.version }}" -F RELEASE_LOG.md ${TAG} \
-            trunk-*/trunk-*
 
-  publish:
-    needs: release
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Setup | Checkout
-        uses: actions/checkout@v7
+      - name: Publish | Replace assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" dist/* --clobber
+          # Drop assets this build did not produce (e.g. a former Windows .tar.gz).
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while read -r asset; do
+            if [[ ! -f "dist/${asset}" ]]; then
+              echo "Removing stale asset ${asset}"
+              gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+            fi
+          done
 
-      - name: Build | Publish
-        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }}
+      # The tag is moved before the upload; fail the run unless the published tag and
+      # every asset match this build, so a partial update is visible and re-runnable.
+      - name: Verify | Published release matches this build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAGGED="$(git ls-remote origin "refs/tags/${RELEASE_TAG}" | awk '{print $1}')"
+          [[ "$TAGGED" == "$SHA" ]] || { echo "tag ${RELEASE_TAG} is ${TAGGED:-missing}, expected ${SHA}"; exit 1; }
 
-  pages:
-    needs:
-      - init
-      - publish
-    if: needs.init.outputs.prerelease != 'true'
-    uses: ./.github/workflows/pages.yaml
+          EXPECTED=(
+            trunk-x86_64-unknown-linux-musl.tar.gz
+            trunk-x86_64-apple-darwin.tar.gz
+            trunk-aarch64-apple-darwin.tar.gz
+            trunk-x86_64-pc-windows-msvc.zip
+          )
+          PUBLISHED="$RUNNER_TEMP/published"
+          rm -rf "$PUBLISHED"
+          gh release download "$RELEASE_TAG" --dir "$PUBLISHED"
+          ACTUAL_COUNT="$(find "$PUBLISHED" -type f | wc -l)"
+          [[ "$ACTUAL_COUNT" -eq $(( ${#EXPECTED[@]} * 2 )) ]] || { echo "expected $(( ${#EXPECTED[@]} * 2 )) assets, found ${ACTUAL_COUNT}"; ls -la "$PUBLISHED"; exit 1; }
+
+          for asset in "${EXPECTED[@]}"; do
+            for file in "$asset" "$asset.sha256"; do
+              [[ -f "$PUBLISHED/$file" ]] || { echo "missing asset $file"; exit 1; }
+            done
+            PUBLISHED_SUM="$(awk '{print $1}' "$PUBLISHED/$asset.sha256")"
+            ACTUAL_SUM="$(sha256sum "$PUBLISHED/$asset" | awk '{print $1}')"
+            BUILT_SUM="$(awk '{print $1}' "dist/$asset.sha256")"
+            if [[ "$ACTUAL_SUM" != "$PUBLISHED_SUM" || "$ACTUAL_SUM" != "$BUILT_SUM" ]]; then
+              echo "checksum mismatch for $asset (downloaded $ACTUAL_SUM, published $PUBLISHED_SUM, built $BUILT_SUM)"
+              exit 1
+            fi
+            echo "ok $asset $ACTUAL_SUM"
+          done

@@ -1,16 +1,11 @@
+# Fork CI: lint + tests on Linux. Pushes to main run this through release.yaml.
 name: CI
 on:
-  push:
-    branches:
-      - main
-      - release/*
   pull_request:
     branches:
       - main
-      - release/*
-  merge_group:
-    types:
-      - checks_requested
+  workflow_call:
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -43,87 +38,14 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo clippy --all-targets --no-default-features --features update_check,native-tls -- -D warnings
           cargo clippy --all-targets --no-default-features --features update_check,rustls-aws-lc -- -D warnings
+          # Feature set of the trunk-itc-dev release binaries.
+          cargo clippy --all-targets --no-default-features --features rustls -- -D warnings
 
       - name: Build | Rustfmt
         run: cargo fmt -- --check
 
-  docs:
-    uses: ./.github/workflows/docs.yaml
-
-  check:
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        rust:
-          - stable
-          - 1.96.1 # MSRV
-    steps:
-      - name: Setup | Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup | Cache Cargo
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-check-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Setup | Disable rustup self-update
-        # workaround for: https://github.com/rust-lang/rustup/issues/3709
-        run: |
-          rustup set auto-self-update disable
-
-      - name: Setup | Rust
-        run: |
-          rustup toolchain install ${{ matrix.rust }}
-          rustup default ${{ matrix.rust }}
-
-      - name: Build | Check
-        run: cargo check --all
-
-      - name: Setup | binstall
-        run: |
-          curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-
-      - name: Setup | check-all-features
-        run: |
-          cargo binstall -y cargo-all-features
-
-      - name: Build | Check all features
-        run: |
-          cargo all-features check --features native-tls
-          cargo all-features check --features rustls
-          cargo all-features check --features rustls-aws-lc
-
-      - name: Build | Reject invalid TLS feature sets
-        if: matrix.rust == 'stable'
-        shell: bash
-        run: |
-          ! cargo check --no-default-features
-          ! cargo check --no-default-features --features native-tls,rustls
-          ! cargo check --no-default-features --features native-tls,rustls-aws-lc
-          ! cargo check --no-default-features --features rustls,rustls-aws-lc
-
   test:
-    needs: check # Ensure check is run first.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ ubuntu-24.04, macos-26, windows-2025 ]
-        include:
-          - os: ubuntu-24.04
-            binPath: target/debug/trunk
-            install: |
-              sudo apt install -y libssl-dev
-          - os: macos-26
-            binPath: target/debug/trunk
-          - os: windows-2025
-            binPath: target/debug/trunk.exe
-
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Setup | Checkout
@@ -140,7 +62,7 @@ jobs:
           key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Setup | Install dependencies
-        run: ${{ matrix.install }}
+        run: sudo apt install -y libssl-dev
 
       - name: Build | Test
         run: |
@@ -155,8 +77,8 @@ jobs:
       - name: Upload | For testing
         uses: actions/upload-artifact@v7
         with:
-          name: test-cli-${{ matrix.os }}
-          path: ${{ matrix.binPath }}
+          name: test-cli
+          path: target/debug/trunk
           if-no-files-found: error
 
   test-examples:
@@ -165,7 +87,6 @@ jobs:
       fail-fast: false
       max-parallel: 32
       matrix:
-        os: [ ubuntu-24.04, macos-26, windows-2025 ]
         example:
           - cargo-manifest
           - cdylib
@@ -187,7 +108,7 @@ jobs:
           - yew-tls
           - yaml-config
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Setup | Checkout
@@ -206,13 +127,12 @@ jobs:
       - name: Setup | Download CLI
         uses: actions/download-artifact@v8
         with:
-          name: test-cli-${{ matrix.os }}
+          name: test-cli
 
       - name: Setup | Make executable
-        if: ${{ !contains(matrix.os, 'windows') }}
         run: chmod a+x $GITHUB_WORKSPACE/trunk
 
-      - name: Setup | Cache | Example ${{ matrix.example }} on ${{ matrix.os }}
+      - name: Setup | Cache | Example ${{ matrix.example }}
         uses: actions/cache@v6
         with:
           path: |
@@ -220,7 +140,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             examples/${{ matrix.example }}/target
-          key: wasm32-example-${{ matrix.example }}-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: wasm32-example-${{ matrix.example }}-${{ hashFiles('**/Cargo.lock') }}
 
       - uses: actions/setup-node@v7
         with:
@@ -236,11 +156,7 @@ jobs:
         with:
           path: |
             ~/.cache/ms-playwright
-            ~/Library/Caches/ms-playwright
-            ~/AppData/Local/ms-playwright
             ~/.cache/trunk
-            ~/Library/Caches/dev.trunkrs.trunk
-            ~/AppData/Local/trunkrs/trunk/cache
           key: browser-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('examples/ci/package-lock.json', 'examples/**/Trunk.*', 'src/tools.rs') }}
 
       - run: npx playwright install --with-deps chromium
@@ -262,7 +178,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
-          name: browser-${{ matrix.os }}-${{ matrix.example }}
+          name: browser-${{ matrix.example }}
           path: examples/ci/test-results
 
   tests:
@@ -290,7 +206,7 @@ jobs:
       - name: Setup | Download CLI
         uses: actions/download-artifact@v8
         with:
-          name: test-cli-ubuntu-24.04
+          name: test-cli
 
       - name: Setup | Make executable
         run: chmod a+x $GITHUB_WORKSPACE/trunk
