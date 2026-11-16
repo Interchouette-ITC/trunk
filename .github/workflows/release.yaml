@@ -3,7 +3,9 @@
 # fork for the platforms Serenade supports, moves tag `trunk-itc-dev` to the commit
 # and replaces the release assets, then verifies the published tag and assets.
 # Serenade downloads these binaries; asset names are stable: trunk-<target>.tar.gz
-# (trunk-<target>.zip on Windows), each with a matching .sha256 file.
+# (trunk-<target>.zip on Windows), each with a matching .sha256 file. Every archive
+# also gets a GitHub build-provenance attestation (Sigstore) signed by this workflow
+# on main; Serenade refuses archives whose attestation does not verify.
 name: Release trunk-itc-dev
 on:
   push:
@@ -109,6 +111,10 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Setup | Checkout
         uses: actions/checkout@v7
@@ -129,6 +135,14 @@ jobs:
           done
           ls -la
 
+      # Attested before anything is published, so no asset is ever served without one.
+      - name: Publish | Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/trunk-*.tar.gz
+            dist/trunk-*.zip
+
       - name: Publish | Move trunk-itc-dev to this commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -139,7 +153,7 @@ jobs:
           VERSION="$(tar -xzOf dist/trunk-x86_64-unknown-linux-musl.tar.gz trunk > "$RUNNER_TEMP/trunk" && chmod +x "$RUNNER_TEMP/trunk" && "$RUNNER_TEMP/trunk" --version)"
           NOTES="Interchouette fork of [Trunk](https://github.com/trunk-rs/trunk) (MIT/Apache-2.0), built from \`main\` @ \`${SHA}\` (\`${VERSION}\`).
 
-          Rolling pre-release, moved on each push to \`main\`. Consumed by Serenade, which downloads \`trunk-<target>.tar.gz\` (\`trunk-<target>.zip\` on Windows) and verifies it against the matching \`.sha256\` file.
+          Rolling pre-release, moved on each push to \`main\`. Consumed by Serenade, which downloads \`trunk-<target>.tar.gz\` (\`trunk-<target>.zip\` on Windows) and verifies it against the matching \`.sha256\` file and its build provenance attestation (\`gh attestation verify <archive> --repo ${GH_REPO} --signer-workflow ${GH_REPO}/.github/workflows/release.yaml\`).
 
           Targets: \`x86_64-unknown-linux-musl\`, \`x86_64-apple-darwin\`, \`aarch64-apple-darwin\`, \`x86_64-pc-windows-msvc\`."
 
@@ -202,5 +216,11 @@ jobs:
               echo "checksum mismatch for $asset (downloaded $ACTUAL_SUM, published $PUBLISHED_SUM, built $BUILT_SUM)"
               exit 1
             fi
-            echo "ok $asset $ACTUAL_SUM"
+            gh attestation verify "$PUBLISHED/$asset" \
+              --repo "$GH_REPO" \
+              --signer-workflow "${GH_REPO}/.github/workflows/release.yaml" \
+              --source-ref refs/heads/main \
+              --source-digest "$SHA" \
+              --predicate-type https://slsa.dev/provenance/v1 > /dev/null
+            echo "ok $asset $ACTUAL_SUM (provenance verified)"
           done
