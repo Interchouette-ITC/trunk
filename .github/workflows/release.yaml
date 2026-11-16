@@ -142,6 +142,8 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: dist
+          # Release archives only, not the CI debug binary (`test-cli`) from the same run.
+          pattern: trunk-*
           merge-multiple: true
 
       - name: Setup | Checksums
