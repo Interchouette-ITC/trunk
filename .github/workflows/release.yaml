@@ -1,8 +1,9 @@
 # Rolling pre-release `trunk-itc-dev` of the Interchouette Trunk fork.
 # Each push to main (or a manual run after an upstream sync) runs CI, builds the
 # fork for the platforms Serenade supports, moves tag `trunk-itc-dev` to the commit
-# and replaces the release assets. Serenade downloads these binaries; asset names
-# are stable: trunk-<target>.tar.gz + trunk-<target>.tar.gz.sha256.
+# and replaces the release assets, then verifies the published tag and assets.
+# Serenade downloads these binaries; asset names are stable: trunk-<target>.tar.gz
+# (trunk-<target>.zip on Windows), each with a matching .sha256 file.
 name: Release trunk-itc-dev
 on:
   push:
@@ -15,7 +16,8 @@ permissions:
 
 concurrency:
   group: release-trunk-itc-dev
-  cancel-in-progress: true
+  # Never cancel a release mid-way: that could leave the tag and assets out of sync.
+  cancel-in-progress: false
 
 env:
   RELEASE_TAG: trunk-itc-dev
@@ -42,6 +44,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-2025
             ext: .exe
+            archive: zip
 
     runs-on: ${{ matrix.os }}
 
@@ -89,13 +92,18 @@ jobs:
           VERSION="$("upload/${BIN}" --version)"
           echo "$VERSION"
           case "$VERSION" in "trunk "*"+itc.${GITHUB_SHA::12}") ;; *) echo "missing build revision"; exit 1 ;; esac
-          tar -czvf "trunk-${{ matrix.target }}.tar.gz" -C upload "${BIN}"
+          # Windows ships as .zip, other targets as .tar.gz (Serenade picks the same format).
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            (cd upload && 7z a -tzip "../trunk-${{ matrix.target }}.zip" "${BIN}")
+          else
+            tar -czvf "trunk-${{ matrix.target }}.tar.gz" -C upload "${BIN}"
+          fi
 
       - name: Post Build | Upload artifacts
         uses: actions/upload-artifact@v7
         with:
           name: trunk-${{ matrix.target }}
-          path: trunk-${{ matrix.target }}.tar.gz
+          path: trunk-${{ matrix.target }}.${{ matrix.archive || 'tar.gz' }}
           if-no-files-found: error
 
   release:
@@ -115,7 +123,8 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          for file in trunk-*.tar.gz; do
+          shopt -s nullglob
+          for file in trunk-*.tar.gz trunk-*.zip; do
             sha256sum "$file" | awk '{print $1}' > "${file}.sha256"
           done
           ls -la
@@ -130,7 +139,7 @@ jobs:
           VERSION="$(tar -xzOf dist/trunk-x86_64-unknown-linux-musl.tar.gz trunk > "$RUNNER_TEMP/trunk" && chmod +x "$RUNNER_TEMP/trunk" && "$RUNNER_TEMP/trunk" --version)"
           NOTES="Interchouette fork of [Trunk](https://github.com/trunk-rs/trunk) (MIT/Apache-2.0), built from \`main\` @ \`${SHA}\` (\`${VERSION}\`).
 
-          Rolling pre-release, moved on each push to \`main\`. Consumed by Serenade, which downloads \`trunk-<target>.tar.gz\` and verifies it against \`trunk-<target>.tar.gz.sha256\`.
+          Rolling pre-release, moved on each push to \`main\`. Consumed by Serenade, which downloads \`trunk-<target>.tar.gz\` (\`trunk-<target>.zip\` on Windows) and verifies it against the matching \`.sha256\` file.
 
           Targets: \`x86_64-unknown-linux-musl\`, \`x86_64-apple-darwin\`, \`aarch64-apple-darwin\`, \`x86_64-pc-windows-msvc\`."
 
@@ -147,4 +156,51 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "$RELEASE_TAG" dist/* --clobber
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" dist/* --clobber
+          # Drop assets this build did not produce (e.g. a former Windows .tar.gz).
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | while read -r asset; do
+            if [[ ! -f "dist/${asset}" ]]; then
+              echo "Removing stale asset ${asset}"
+              gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+            fi
+          done
+
+      # The tag is moved before the upload; fail the run unless the published tag and
+      # every asset match this build, so a partial update is visible and re-runnable.
+      - name: Verify | Published release matches this build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAGGED="$(git ls-remote origin "refs/tags/${RELEASE_TAG}" | awk '{print $1}')"
+          [[ "$TAGGED" == "$SHA" ]] || { echo "tag ${RELEASE_TAG} is ${TAGGED:-missing}, expected ${SHA}"; exit 1; }
+
+          EXPECTED=(
+            trunk-x86_64-unknown-linux-musl.tar.gz
+            trunk-x86_64-apple-darwin.tar.gz
+            trunk-aarch64-apple-darwin.tar.gz
+            trunk-x86_64-pc-windows-msvc.zip
+          )
+          PUBLISHED="$RUNNER_TEMP/published"
+          rm -rf "$PUBLISHED"
+          gh release download "$RELEASE_TAG" --dir "$PUBLISHED"
+          ACTUAL_COUNT="$(find "$PUBLISHED" -type f | wc -l)"
+          [[ "$ACTUAL_COUNT" -eq $(( ${#EXPECTED[@]} * 2 )) ]] || { echo "expected $(( ${#EXPECTED[@]} * 2 )) assets, found ${ACTUAL_COUNT}"; ls -la "$PUBLISHED"; exit 1; }
+
+          for asset in "${EXPECTED[@]}"; do
+            for file in "$asset" "$asset.sha256"; do
+              [[ -f "$PUBLISHED/$file" ]] || { echo "missing asset $file"; exit 1; }
+            done
+            PUBLISHED_SUM="$(awk '{print $1}' "$PUBLISHED/$asset.sha256")"
+            ACTUAL_SUM="$(sha256sum "$PUBLISHED/$asset" | awk '{print $1}')"
+            BUILT_SUM="$(awk '{print $1}' "dist/$asset.sha256")"
+            if [[ "$ACTUAL_SUM" != "$PUBLISHED_SUM" || "$ACTUAL_SUM" != "$BUILT_SUM" ]]; then
+              echo "checksum mismatch for $asset (downloaded $ACTUAL_SUM, published $PUBLISHED_SUM, built $BUILT_SUM)"
+              exit 1
+            fi
+            echo "ok $asset $ACTUAL_SUM"
+          done
