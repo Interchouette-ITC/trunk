@@ -86,7 +86,7 @@ async fn run() -> Result<ExitCode> {
         "{}Starting {} {}",
         STARTING,
         env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION")
+        env!("TRUNK_BUILD_VERSION")
     );
 
     Ok(match cli.run().await {
@@ -148,7 +148,7 @@ fn eval_logging(cli: &Trunk) -> tracing_subscriber::EnvFilter {
 
 /// Build, bundle & ship your Rust WASM application to the web.
 #[derive(Parser)]
-#[command(about, author, version)]
+#[command(about, author, version = env!("TRUNK_BUILD_VERSION"))]
 struct Trunk {
     #[command(subcommand)]
     action: TrunkSubcommands,

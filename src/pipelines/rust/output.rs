@@ -350,7 +350,10 @@ mod tests {
         }
         let serialized = serde_json::to_value(&manifest).expect("serialize manifest");
         assert_eq!(
-            serialized["document_assets"].as_array().unwrap().len(),
+            serialized["document_assets"]
+                .as_array()
+                .expect("document_assets array")
+                .len(),
             manifest.document_assets.len()
         );
     }
