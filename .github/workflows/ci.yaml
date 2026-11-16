@@ -81,32 +81,15 @@ jobs:
           path: target/debug/trunk
           if-no-files-found: error
 
+  # The fork ships the Trunk binary Serenade uses, and Serenade targets Leptos;
+  # upstream's other framework/config examples are not run here.
   test-examples:
     needs: test # Ensure test is run first.
     strategy:
       fail-fast: false
-      max-parallel: 32
       matrix:
         example:
-          - cargo-manifest
-          - cdylib
-          - hooks
-          - initializer
           - leptos
-          - no-rust
-          - node-module
-          - proxy
-          - seed
-          - target-path
-          - vanilla
-          - webworker
-          - webworker-gloo
-          - webworker-module
-          - wasm_threads
-          - yew
-          - yew-tailwindcss
-          - yew-tls
-          - yaml-config
 
     runs-on: ubuntu-24.04
 
@@ -169,7 +152,6 @@ jobs:
         run: $GITHUB_WORKSPACE/trunk --config=examples/${{ matrix.example }} build --release
 
       - name: Test example in browser
-        if: matrix.example != 'proxy'
         working-directory: examples/ci
         env:
           EXAMPLE: ${{ matrix.example }}

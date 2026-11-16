@@ -259,7 +259,9 @@ async fn file_content_digest(path: &Path) -> Result<String> {
         )
     })?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0; 64 * 1024];
+    // Heap-allocated: an inline array would be held across `.await`, bloating every
+    // future that awaits this one and overflowing worker stacks in debug builds.
+    let mut buffer = vec![0; 64 * 1024];
 
     loop {
         let bytes_read = file.read(&mut buffer).await.with_context(|| {
