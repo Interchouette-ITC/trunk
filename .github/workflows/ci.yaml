@@ -1,4 +1,5 @@
-# Fork CI: lint + tests on Linux. Pushes to main run this through release.yaml.
+# Fork CI: lint + tests on Linux, on pull requests to main. Manual releases also run
+# this through release.yaml.
 name: CI
 on:
   pull_request:
